@@ -141,7 +141,7 @@ if run_button:
         else:
             st.write("Principales factores que influyen en la predicción:")
             shap_df = pd.DataFrame(shap_list, columns=["Feature", "SHAP value"])
-            st.dataframe(shap_df, width="stretch")
+            st.dataframe(shap_df, use_container_width=True)
 
 
     with tab2:
@@ -184,7 +184,7 @@ if run_button:
                 name="Precio recomendado",
             )
 
-            st.plotly_chart(fig, width="stretch")
+            st.plotly_chart(fig, use_container_width=True)
 
             st.markdown("#### Tabla de escenarios simulados")
             table_df = sim_df.rename(
@@ -194,7 +194,7 @@ if run_button:
                     "predicted_revenue": "Ingresos predichos (USD)",
                 }
             )
-            st.dataframe(table_df, width="stretch")
+            st.dataframe(table_df, use_container_width=True)
         else:
             st.write("La estructura de `simulation_table` no es la esperada.")
             st.plotly_chart(sim_df, width="stretch")
