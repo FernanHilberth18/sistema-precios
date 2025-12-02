@@ -1,5 +1,3 @@
-# sistema-precios
-
 # Sistema Inteligente de Recomendación de Precios
 
 Este proyecto consiste en un sistema inteligente que recomienda precios óptimos para productos, estimando la demanda esperada y los ingresos proyectados en función de distintos escenarios de precios. Utiliza un modelo de **XGBoost** entrenado sobre un conjunto de datos de precios de productos, y la justificación de las recomendaciones se realiza mediante **SHAP** para la interpretación de características.
