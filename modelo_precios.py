@@ -1,10 +1,4 @@
 # modelo_precios.py
-# Lógica del Sistema Inteligente de Recomendación de Precios
-# - Carga retail_price.csv
-# - Reconstruye el TargetEncoder para categorías
-# - Carga el modelo entrenado (rf_model.joblib)
-# - Prepara fila, simula escenarios y devuelve recomendación + explicación
-
 import os
 from pathlib import Path
 
@@ -23,7 +17,7 @@ RANDOM_STATE = 42
 BASE_DIR = Path(__file__).resolve().parent
 DATA_PATH = BASE_DIR / "retail_price.csv"
 MODEL_DIR = BASE_DIR / "models"
-MODEL_PATH = MODEL_DIR / "rf_model.joblib"
+MODEL_PATH = MODEL_DIR / "xgb_model.joblib"
 
 TARGET = "qty"
 
@@ -34,10 +28,7 @@ TARGET = "qty"
 if not DATA_PATH.exists():
     raise FileNotFoundError(f"No se encontró el dataset en {DATA_PATH}")
 
-DATA_PATH = BASE_DIR / "retail_price.csv"
-
 df = pd.read_csv(DATA_PATH)
-
 
 if TARGET not in df.columns:
     raise ValueError(f"El dataset debe contener la columna de target '{TARGET}'.")
@@ -216,77 +207,118 @@ def simulate_price_recommendation(
     return sim_df, float(best_row["price"]) # type: ignore
 
 
-# ==============================================
-# FUNCIÓN PRINCIPAL: RECOMENDACIÓN + EXPLICACIÓN
-# ==============================================
+# ==========================
+# RECOMMENDACIÓN DE PRECIO
+# ==========================
+FEATURES = FEATURE_CANDIDATES
 
 def recommend_price_and_explain(
-    row_original: pd.DataFrame,
-    model=MODEL,
-    price_col: str = "unit_price",
+    row_original, 
+    model=MODEL, 
+    encoder=te, 
+    features=FEATURES, 
+    price_col='unit_price'
 ):
     """
-    Recibe un DataFrame de 1 fila con las columnas originales de retail_price.csv
-    y devuelve:
-      - precio recomendado
-      - demanda e ingreso esperados
-      - elasticidad aproximada
-      - top factores shap
-      - tabla de simulación
+    Recibe un DataFrame de 1 fila con las columnas originales
+    y devuelve recomendación de precio + explicación.
+    Funciona aunque falten columnas.
     """
 
-    # Predicción a precio actual
-    Xrow = _prepare_row_for_model(row_original)
+    # Copia segura
+    row = row_original.copy()
+
+    # --- RECREAR FEATURES ENGINEERED EXACTAMENTE COMO EL PREPROCESSING ---
+    # Revenue
+    if 'unit_price' in row.columns and 'qty' in row.columns and 'revenue' in features:
+        row['revenue'] = row['unit_price'] * row['qty']
+
+    # Peso en kg
+    if 'product_weight_g' in row.columns and 'weight_kg' in features:
+        row['weight_kg'] = row['product_weight_g'] / 1000.0
+
+    # --- RELLENAR COLUMNAS QUE FALTEN PARA EL MODELO ---
+    for c in features:
+        if c not in row.columns:
+            row[c] = np.nan
+
+    # --- RELLENO DE NULOS (MISMA LÓGICA DEL PREPROC) ---
+    for c in NUM_COLS:
+        if c in row.columns:
+            row[c] = row[c].fillna(df[c].median())
+
+    for c in CATEGORICAL_COLS:
+        if c in row.columns:
+            row[c] = row[c].fillna('__missing__')
+
+    # --- ENCODING CATEGÓRICO ---
+    if len(CATEGORICAL_COLS) > 0:
+        try:
+            row[CATEGORICAL_COLS] = encoder.transform(row[CATEGORICAL_COLS]) # type: ignore
+        except:
+            pass
+
+    # --- PREDICCIÓN A PRECIO ACTUAL ---
+    Xrow = row[features]
     current_qty = float(model.predict(Xrow)[0])
-    current_price = float(row_original[price_col].values[0])
+    current_price = float(row[price_col].values[0])
     current_rev = current_qty * current_price
 
-    # Simulación de precios
+    # --- SIMULACIÓN DE PRECIOS ---
     sim_df, best_price = simulate_price_recommendation(
-        model=model,
-        row_original=row_original,
+        model, row,
         price_col=price_col,
     )
-    best_row = sim_df.loc[sim_df["price"] == best_price].iloc[0]
 
-    # SHAP local
-    top_features = []
-    if EXPLAINER is not None:
-        try:
-            shap_local = EXPLAINER(Xrow)
+    best_row = sim_df.loc[sim_df['price'] == best_price].iloc[0]
+
+    # --- SHAP LOCAL EXPLANATION ---
+    try:
+        x_enc = Xrow.fillna(0)
+        if EXPLAINER is not None:
+            shap_local = EXPLAINER(x_enc)
             shap_vals = shap_local.values[0]
             idx_top = np.argsort(np.abs(shap_vals))[::-1][:5]
             top_features = [(Xrow.columns[i], float(shap_vals[i])) for i in idx_top]
-        except Exception:
+        else:
             top_features = []
+    except:
+        top_features = []
 
-    # Elasticidad aproximada (cambio ±10% en el precio)
-    price_up = current_price * 1.10
-    price_down = current_price * 0.90
+    # --- ELASTICIDAD --- (respuesta qty a +/-10% cambio en precio)
+    price_up = current_price * 1.1
+    price_down = current_price * 0.9
 
-    row_up = row_original.copy()
-    row_up[price_col] = price_up
-    X_up = _prepare_row_for_model(row_up)
-    qty_up = float(model.predict(X_up)[0])
+    test_up = row.copy()
+    test_down = row.copy()
+    test_up[price_col] = price_up
+    test_down[price_col] = price_down
 
-    row_down = row_original.copy()
-    row_down[price_col] = price_down
-    X_down = _prepare_row_for_model(row_down)
-    qty_down = float(model.predict(X_down)[0])
+    if len(CATEGORICAL_COLS) > 0:
+        try:
+            if encoder is not None:
+                test_up[CATEGORICAL_COLS] = encoder.transform(test_up[CATEGORICAL_COLS])
+                test_down[CATEGORICAL_COLS] = encoder.transform(test_down[CATEGORICAL_COLS])
+        except:
+            pass
+
+    qty_up = float(model.predict(test_up[features])[0])
+    qty_down = float(model.predict(test_down[features])[0])
 
     pct_qty = (qty_down - qty_up) / ((qty_down + qty_up) / 2 + 1e-9)
     pct_price = (price_down - price_up) / ((price_down + price_up) / 2 + 1e-9)
     elasticity = pct_qty / (pct_price + 1e-9)
 
+    # --- SALIDA FINAL ---
     return {
-        "current_qty": current_qty,
-        "current_revenue": current_rev,
-        "recommended_price": best_price,
-        "recommended_pred_qty": float(best_row["predicted_qty"]),
-        "recommended_pred_revenue": float(best_row["predicted_revenue"]),
-        "top_shap_features": top_features,
-        "elasticity_approx": float(elasticity),
-        "simulation_table": sim_df,
+        'current_qty': current_qty,
+        'current_revenue': current_rev,
+        'recommended_price': best_price,
+        'recommended_pred_qty': best_row['predicted_qty'],
+        'recommended_pred_revenue': best_row['predicted_revenue'],
+        'top_shap_features': top_features,
+        'elasticity_approx': elasticity,
+        'simulation_table': sim_df
     }
 
 # =========================
@@ -307,73 +339,224 @@ if "product_category_name" not in df.columns:
 CATEGORIES = sorted(df["product_category_name"].dropna().unique().tolist())
 
 
-# ==============================================
-# FUNCIÓN: JUSTIFICACIÓN EN TEXTO
-# ==============================================
 
-def build_justification(result: dict, category: str) -> str:
+# ======================================================
+# JUSTIFICACIÓN COMPLETA
+# ======================================================
+
+def build_justification(result, category: str) -> str:
     price = result["recommended_price"]
     qty = result["recommended_pred_qty"]
     revenue = result["recommended_pred_revenue"]
     elasticity = result["elasticity_approx"]
-    shap_list = result.get("top_shap_features", [])
+    shap = result["top_shap_features"]
 
-    # Interpretación simple de elasticidad
     if elasticity < -1:
         e_text = "muy sensible al precio"
     elif elasticity < -0.5:
-        e_text = "moderadamente sensible al precio"
+        e_text = "moderadamente sensible"
     elif elasticity < -0.1:
-        e_text = "poco sensible al precio"
+        e_text = "poco sensible"
     else:
         e_text = "prácticamente inelástica"
 
-    # Interpretación de demanda
+    # -----------------------------------------------------------
+    # INTERPRETACIÓN PERSONALIZADA DE LA DEMANDA ESTIMADA
+    # -----------------------------------------------------------
     if qty < 5:
         dem_msg = (
-            "La demanda estimada es baja, lo que sugiere un mercado reducido o alta "
-            "sensibilidad al precio en esta categoría."
+            "La demanda estimada es muy baja. Esto suele indicar que el producto es especialmente sensible al precio "
+            "o que el mercado para esta categoría tiene poco movimiento en este periodo."
         )
     elif qty < 20:
         dem_msg = (
-            "La demanda esperada es moderada y refleja un equilibrio razonable entre "
-            "volumen de ventas e ingreso esperado."
+            "La demanda esperada es moderada. Representa un comportamiento estable donde el precio recomendado mantiene "
+            "un equilibrio razonable entre ventas y ganancia."
         )
     else:
         dem_msg = (
-            "La demanda proyectada es alta, indicando que el precio recomendado coloca "
-            "al producto en una zona atractiva para el mercado."
+            "La demanda proyectada es alta, lo cual es un excelente indicador. El precio recomendado está en un punto "
+            "donde el volumen de ventas puede ser fuerte sin sacrificar rentabilidad."
         )
 
-    shap_lines = []
-    for feature, value in shap_list:
-        tono = "positivo" if value >= 0 else "negativo"
-        shap_lines.append(f"• {feature}: {value:.4f} ({tono})")
+    # -----------------------------------------------------------
+    # INTERPRETACIÓN PERSONALIZADA DE LA ELASTICIDAD
+    # -----------------------------------------------------------
+    if elasticity < -1.2:
+        ela_msg = (
+            "Este producto es altamente elástico. Pequeños cambios en el precio generan variaciones fuertes en la demanda. "
+            "Los consumidores reaccionan rápidamente ante cualquier ajuste."
+        )
+    elif elasticity < -0.6:
+        ela_msg = (
+            "El producto muestra elasticidad considerable. El precio influye de forma notable en la decisión de compra, "
+            "pero sin llegar a ser extremo."
+        )
+    elif elasticity < -0.2:
+        ela_msg = (
+            "El producto tiene elasticidad moderada. El precio afecta a la demanda, aunque los cambios no son tan drásticos."
+        )
+    else:
+        ela_msg = (
+            "El producto es prácticamente inelástico. Los consumidores mantienen su comportamiento aunque el precio varíe."
+        )
 
-    shap_text = "\n".join(shap_lines) if shap_lines else "No se pudieron calcular factores SHAP."
+    # ===========================================================
+    # INTERPRETACIÓN AVANZADA Y PERSONALIZADA DE SHAP
+    # ===========================================================
+    if not shap:
+        shap_interpretation = (
+            "\n\nNo se pudo generar una interpretación detallada de los factores SHAP para este producto. "
+            "Esto no afecta la recomendación de precio, pero limita el nivel de explicación disponible.\n"
+        )
+    else:
+        shap_interpretation = (
+            "\n\n         "
+            "Interpretación avanzada de los Factores SHAP\n\n"
+        )
 
-    texto = f"""
-Esta recomendación se basa en el comportamiento histórico de la categoría **{category}** 
-y en la forma en que el modelo ha aprendido la relación entre precio y demanda.
+        # Detectamos máximo absoluto para identificar el más fuerte
+        max_abs = max(abs(v) for _, v in shap)
 
-**1. Precio recomendado**
+        for feature, value in shap:
+            abs_v = abs(value)
 
-El sistema sugiere fijar un precio de **${price:.2f}**. Este valor busca maximizar el ingreso esperado
-frente a otros niveles de precio simulados para este mismo producto.
+            # --------------- NIVEL DE IMPACTO ---------------
+            if abs_v == max_abs:
+                fuerza = "Este es el impacto más fuerte de todos"
+            elif abs_v > 7:
+                fuerza = "Su efecto es bastante grande"
+            elif abs_v > 3:
+                fuerza = "Tiene un impacto moderado pero importante"
+            elif abs_v > 1:
+                fuerza = "Su influencia es perceptible y relevante"
+            elif abs_v > 0.3:
+                fuerza = "Su efecto es ligero"
+            else:
+                fuerza = "Su efecto es muy pequeño"
 
-**2. Demanda esperada e ingresos**
+            # --------------- TIPO DE IMPACTO (positivo/negativo) ---------------
+            if value < -7:
+                tono = "muy negativo"
+                explicacion = (
+                    "Históricamente, cuando esta variable aumenta, la demanda suele caer fuertemente. "
+                    "El modelo interpreta que este valor va en contra del precio que funciona bien."
+                )
+                implicacion = (
+                    "Empuja la predicción hacia reducir la demanda y sugiere que el precio ingresado "
+                    "está por encima de lo óptimo."
+                )
 
-La demanda estimada a este nivel de precio es de aproximadamente **{qty:.2f} unidades**.
-{dem_msg}
-Con este nivel de demanda se proyecta un ingreso de **${revenue:,.2f}**.
+            elif value < -3:
+                tono = "negativo"
+                explicacion = (
+                    "Este valor indica que la variable tiende a disminuir la demanda en este contexto. "
+                    "No es un impacto extremo, pero sí consistente con patrones históricos."
+                )
+                implicacion = (
+                    "El modelo compensa este efecto ajustando el precio recomendado un poco a la baja."
+                )
 
-**3. Elasticidad aproximada del producto**
+            elif value < -0.8:
+                tono = "ligeramente negativo"
+                explicacion = (
+                    "Sugiere que la situación actual de esta variable no es favorable para sostener "
+                    "precios más altos, pero tampoco es un efecto severo."
+                )
+                implicacion = (
+                    "La recomendación final atenúa el precio sugerido para equilibrar este pequeño freno en la demanda."
+                )
 
-La elasticidad calculada es **{elasticity:.4f}**, por lo que el producto es **{e_text}**.  
-En términos prácticos, esto indica qué tan fuerte responde la demanda ante variaciones en el precio.
+            elif value < -0.2:
+                tono = "muy suave negativo"
+                explicacion = (
+                    "Indica un pequeño sesgo hacia la reducción de demanda, pero el efecto es débil."
+                )
+                implicacion = (
+                    "Su participación en el precio recomendado es mínima."
+                )
 
-**4. Principales factores explicativos (tipo SHAP)**
+            elif value < 0.2:
+                tono = "casi neutro"
+                explicacion = (
+                    "Este factor prácticamente no cambia la demanda. "
+                    "En los datos históricos su influencia es marginal."
+                )
+                implicacion = (
+                    "No afecta de manera significativa la decisión del precio recomendado."
+                )
 
-{shap_text}
-"""
-    return texto.strip()
+            elif value < 1.2:
+                tono = "positivo"
+                explicacion = (
+                    "Este valor indica que la variable ayuda ligeramente a aumentar la demanda. "
+                    "Es un empuje favorable pero no dominante."
+                )
+                implicacion = (
+                    "Contribuye a que el modelo no recomiende bajar demasiado el precio."
+                )
+
+            elif value < 4:
+                tono = "bastante positivo"
+                explicacion = (
+                    "Refleja que esta variable fortalece la demanda de forma clara. "
+                    "Históricamente, cuando este valor crece, el mercado responde bien."
+                )
+                implicacion = (
+                    "Esto actúa como contrapeso ante otros factores negativos."
+                )
+
+            else:
+                tono = "muy positivo"
+                explicacion = (
+                    "Este es un impulso grande hacia arriba en la demanda. "
+                    "En los datos, esta variable está fuertemente asociada con mejores ventas."
+                )
+                implicacion = (
+                    "Ayuda notablemente a sostener el precio sugerido o incluso subirlo ligeramente."
+                )
+
+            # --------------- MENSAJE FINAL ---------------
+            shap_interpretation += (
+                f"\n• {feature}: {value:.4f} ({tono})\n"
+                f"\n{fuerza}.\n\n"
+                f"- Interpretación: {explicacion}\n\n"
+                f"- ¿Qué implica?: {implicacion}\n\n\n"
+            )
+
+    justification = f"""
+Esta recomendación se construye a partir del análisis integral del producto dentro
+de su categoría "{category}", considerando tanto su comportamiento histórico como la
+respuesta esperada del mercado frente a variaciones de precio.
+
+                                                                       
+        Precio recomendado
+
+
+El sistema sugiere fijar un precio de ${price:.2f}. Este valor equilibra el nivel de demanda esperada con la 
+maximización del ingreso proyectado. 
+
+El precio no se elige solo porque sea “alto” o “bajo”, sino porque representa el punto donde la relación 
+entre volumen vendido y ganancia estimada es más favorable para este producto.
+
+                                                                   
+        Demanda esperada y su impacto
+
+
+• Demanda estimada: {qty:.2f} unidades.
+
+{dem_msg} Se proyecta un ingreso aproximado de ${revenue:.2f}. 
+
+                                                               
+        Elasticidad del producto
+
+• Elasticidad del producto: {elasticity:.4f}
+
+{ela_msg}
+
+Este dato es importante porque explica qué tan “delicado” es el mercado con respecto a los cambios de precio.
+{shap_interpretation}
+""".strip()
+
+    return justification.strip()
+    

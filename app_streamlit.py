@@ -1,39 +1,35 @@
-# app_streamlit.py
-# Dashboard empresarial con Streamlit usando modelo_precios.py
-
 import streamlit as st
 import pandas as pd
 import plotly.express as px
 
-from modelo_precios import (
-    df,
-    CATEGORIES,
-    recommend_price_and_explain,
-    build_justification,
-)
+# Lógica ya definida
+from modelo_precios import recommend_price_and_explain, build_justification
 
+# ------------------ CONFIGURACIÓN ------------------ #
 st.set_page_config(
-    page_title="Sistema Inteligente de Precios",
+    page_title="Sistema Inteligente de Recomendación de Precios",
     layout="wide",
-    page_icon="📊",
+    page_icon="📊"
 )
 
 st.title("📊 Sistema Inteligente de Recomendación de Precios")
 st.markdown(
     """
 Este panel permite analizar el efecto del precio sobre la demanda, 
-estimar ingresos esperados y ver la explicación del modelo de forma visual.
+estimando ingresos esperados y explicando la lógica del modelo.
 """
 )
 
-# ------------------ SIDEBAR: CONFIGURACIÓN ------------------ #
+# ------------------ CARGA DE DATOS ------------------ #
+df = pd.read_csv("retail_price.csv")
+CATEGORIES = sorted(df["product_category_name"].dropna().unique().tolist())
 
+# ------------------ CONFIGURACIÓN DEL ESCENARIO ------------------ #
 st.sidebar.header("Configuración del escenario")
-
 selected_category = st.sidebar.selectbox(
     "Categoría de producto",
     options=CATEGORIES,
-    index=0 if CATEGORIES else 0,
+    index=0 if CATEGORIES else 0
 )
 
 input_price = st.sidebar.number_input(
@@ -41,20 +37,18 @@ input_price = st.sidebar.number_input(
     min_value=0.0,
     value=39.99,
     step=0.5,
-    format="%.2f",
+    format="%.2f"
 )
 
 run_button = st.sidebar.button("🚀 Generar recomendación")
 
 st.sidebar.markdown(
     """
-- Prueba distintos precios para ver cómo cambia:
-  - la demanda estimada  
-  - los ingresos proyectados  
-  - la elasticidad aproximada
+Prueba distintos precios para observar cómo cambia la curva de ingresos y la elasticidad.
 """
 )
 
+# ------------------ FUNCIÓN PRINCIPAL ------------------ #
 
 def ejecutar_recomendacion_streamlit(category: str, price_input: float):
     df_cat = df[df["product_category_name"] == category]
@@ -62,16 +56,14 @@ def ejecutar_recomendacion_streamlit(category: str, price_input: float):
         st.error(f"No se encontraron filas para la categoría '{category}'.")
         return None
 
+    # Tomamos la primera fila de la categoría como "perfil base"
     row = df_cat.iloc[[0]].copy()
     row["unit_price"] = price_input
 
     result = recommend_price_and_explain(row)
     return result
 
-
-# ======================================================
-#                     MAIN LAYOUT
-# ======================================================
+# ------------------ LAYOUT PRINCIPAL ------------------ #
 
 if run_button:
     result = ejecutar_recomendacion_streamlit(selected_category, input_price) # type: ignore
@@ -79,27 +71,28 @@ if run_button:
     if result is None:
         st.stop()
 
-    # ------- KPIs PRINCIPALES -------
+    # ------------------ KPIs PRINCIPALES ------------------ #
     col1, col2, col3 = st.columns(3)
 
     with col1:
         st.metric(
             label="💰 Precio recomendado",
-            value=f"${result['recommended_price']:.2f}",
+            value=f"${result['recommended_price']:.2f}"
         )
 
     with col2:
         st.metric(
             label="📦 Demanda esperada (unidades)",
-            value=f"{result['recommended_pred_qty']:.2f}",
+            value=f"{result['recommended_pred_qty']:.2f}"
         )
 
     with col3:
         st.metric(
             label="📈 Ingreso estimado",
-            value=f"${result['recommended_pred_revenue']:.2f}",
+            value=f"${result['recommended_pred_revenue']:.2f}"
         )
 
+    # Segunda fila de resumen
     st.markdown("---")
     st.subheader("Resumen ejecutivo del escenario")
 
@@ -128,7 +121,8 @@ if run_button:
             desc = "Demanda prácticamente inelástica."
         st.info(desc)
 
-    # ------- EXPLICACIÓN DEL MODELO -------
+    # ------------------ EXPLICACIÓN DEL MODELO ------------------ #
+
     st.markdown("---")
     st.subheader("🧠 Explicación del modelo")
 
@@ -143,12 +137,12 @@ if run_button:
             shap_df = pd.DataFrame(shap_list, columns=["Feature", "SHAP value"])
             st.dataframe(shap_df, use_container_width=True)
 
-
     with tab2:
         just_text = build_justification(result, selected_category) # type: ignore
         st.write(just_text)
 
-    # ------- ESCENARIOS SIMULADOS -------
+    # ------------------ ESCENARIOS SIMULADOS ------------------ #
+
     st.markdown("---")
     st.subheader("📈 Escenarios simulados de precio vs ingresos")
 
@@ -197,7 +191,7 @@ if run_button:
             st.dataframe(table_df, use_container_width=True)
         else:
             st.write("La estructura de `simulation_table` no es la esperada.")
-            st.plotly_chart(sim_df, width="stretch")
+            st.dataframe(sim_df, use_container_width=True)
 
 else:
     st.info(
