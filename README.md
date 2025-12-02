@@ -28,3 +28,19 @@ Para configurar el proyecto en tu entorno local, sigue estos pasos:
    ```bash
    git clone https://github.com/tu_usuario/sistema-inteligente-precios.git
    cd sistema-inteligente-precios
+   
+2. **Crear un entorno virtual (opcional pero recomendado)**:
+    ```bash
+   python -m venv venv
+   source venv/bin/activate  # En Linux/macOS
+   venv\Scripts\activate     # En Windows
+    
+3. **Instalar las dependencias**:
+Asegúrate de tener pip actualizado y luego instala todas las dependencias necesarias:
+```bash
+pip install -r requirements.txt
+
+Licencia
+
+Este proyecto está bajo la Licencia MIT. Consulta el archivo LICENSE
+ para más detalles.
